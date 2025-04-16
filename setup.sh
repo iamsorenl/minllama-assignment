@@ -17,3 +17,9 @@ pip install numpy==1.26.3
 pip install tokenizers==0.13.3
 pip install sentencepiece==0.1.99
 wget https://www.cs.cmu.edu/~vijayv/stories42M.pt
+
+'''
+created a python virtual environment called llama_hw and the packages installed in it include the ones in requirements.txt
+
+pip install -r requirements.txt
+'''

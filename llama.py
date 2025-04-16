@@ -37,14 +37,34 @@ class RMSNorm(torch.nn.Module):
         the given epsilon value (self.eps) to the tensor's norm (i.e. inside
         the square root in Equation 4) before normalizing the tensor.
 
+        Apply root mean square normalization:
+    
+        RMS(x) = sqrt(mean(x^2) + eps)
+        x_norm = x / RMS(x)
+        
         Args:
-            x (torch.Tensor): The input tensor.
-
+            x (torch.Tensor): input tensor of shape (..., dim)
+        
         Returns:
-            torch.Tensor: The normalized tensor.
+            torch.Tensor: normalized tensor of the same shape
         """
-        # todo
-        raise NotImplementedError
+        # square each element
+        squared = x ** 2
+
+        # compute the mean across the last dimension (1/n * sum_i a_i ** 2)
+        mean_squared = torch.mean(squared, dim=-1, keepdim=True)
+
+        # add epsilon to the mean squared value for numerical stability
+        mean_squared += self.eps
+
+        # compute the root mean square
+        rms = torch.sqrt(mean_squared)
+
+        # normalize the input tensor by dividing by the root mean square
+        normalized = x / rms
+
+        # ensure the output has the same shape as the input
+        return normalized
 
     def forward(self, x):
         """
