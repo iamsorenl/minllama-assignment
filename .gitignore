@@ -107,5 +107,6 @@ venv.bak/
 
 # PyTorch model files
 *.pt
+*.pt.1
 
 llama_hw/
