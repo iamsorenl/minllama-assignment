@@ -113,8 +113,26 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        # todo
-        raise NotImplementedError
+        # Compute raw attention scores Q @ K^T
+        # We need to transpose the last two dimensions of key to get K^T
+        # result: (batch, heads, seq_len, seq_len)
+        scores = torch.matmul(query, key.transpose(-2, -1))
+
+        # Scale the scores by sqrt(d_k) (head dimension)
+        dk = query.size(-1)
+        scores = scores / math.sqrt(dk)
+
+        # Apply softmax to turn scores into probabilities
+        attn_weights = F.softmax(scores, dim=-1)
+
+        # Apply dropout to the attention weights
+        attn_weights = self.attn_dropout(attn_weights)
+
+        # Multiply the attention weights with V
+        # shape: (batch, heads, seq_len, head_dim)
+        output = torch.matmul(attn_weights, value)
+
+        return output
 
     def forward(
         self,
@@ -211,13 +229,33 @@ class LlamaLayer(nn.Module):
         1) layer normalization of the input (via Root Mean Square layer normalization)
         2) self-attention on the layer-normalized input
         3) a residual connection (i.e., add the input to the output of the self-attention)
-        3) layer normalization on the output of the self-attention
-        4) a feed-forward network on the layer-normalized output of the self-attention
-        5) add a residual connection from the unnormalized self-attention output to the
+        4) layer normalization on the output of the self-attention
+        5) a feed-forward network on the layer-normalized output of the self-attention
+        6) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
-        # todo
-        raise NotImplementedError
+        # Save original input for residual connection
+        residual = x
+
+        # 1) Normalize input
+        x_norm = self.attention_norm(x)
+
+        # 2) Self-attention on normalized input
+        attn_output = self.attention(x_norm)
+
+        # 3) Residual connection: add unnormalized input
+        x = residual + attn_output
+
+        # 4) Normalize again before FFN
+        residual = x
+        x_norm = self.ffn_norm(x)
+
+        # 5) Feed-forward network on normalized input
+        ffn_output = self.feed_forward(x_norm)
+
+        # 6) Residual connection again
+        x = residual + ffn_output
+        return x
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
