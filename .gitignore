@@ -108,4 +108,6 @@ venv.bak/
 # PyTorch model files
 *.pt
 *.pt.*
+
+# custom virtual environment name
 llama_hw/
