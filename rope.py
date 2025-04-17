@@ -64,12 +64,33 @@ def apply_rotary_emb(
     # First, compute the trigonometric values in the second and fourth columns in
     # slide 22 (linked above).
 
-    # Then, combine these trigonometric values with the tensors query_real, query_imag,
-    # key_real, and key_imag.
+    # Compute inverse frequency for each dimension
+    freq_seq = torch.arange(0, head_dim, 2, device=device)
+    inv_freq = 1.0 / (theta ** (freq_seq.float() / head_dim))  # shape: (head_dim // 2)
 
-    raise NotImplementedError
+    # Generate sequence position indices
+    t = torch.arange(seqlen, device=device)  # (seqlen,)
 
-    query_out = None
-    key_out = None
+    # Outer product gives us full frequencies
+    freqs = torch.outer(t, inv_freq)  # (seqlen, head_dim // 2)
+
+    # Convert to complex representation (e^{iθ} = cos(θ) + i sin(θ))
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # (seqlen, head_dim // 2)
+
+    # Broadcast to match Q/K tensor shapes
+    freqs_cis = reshape_for_broadcast(freqs_cis, query_real)  # (1, seqlen, 1, head_dim // 2)
+
+    # Form complex tensors for Q and K
+    query_complex = torch.complex(query_real, query_imag)
+    key_complex = torch.complex(key_real, key_imag)
+
+    # Apply element-wise rotation (complex multiplication)
+    query_rotated = query_complex * freqs_cis
+    key_rotated = key_complex * freqs_cis
+
+    # Convert back to real representation
+    query_out = torch.view_as_real(query_rotated).reshape_as(query)
+    key_out = torch.view_as_real(key_rotated).reshape_as(key)
+
     # Return the rotary position embeddings for the query and key tensors
     return query_out, key_out
