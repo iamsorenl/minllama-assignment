@@ -24,7 +24,6 @@ class RMSNorm(torch.nn.Module):
         Attributes:
             eps (float): A small value added to the denominator for numerical stability.
             weight (nn.Parameter): Learnable scaling parameter.
-
         """
         super().__init__()
         self.eps = eps
@@ -32,39 +31,15 @@ class RMSNorm(torch.nn.Module):
 
     def _norm(self, x):
         """
-        Compute the root mean square normalization. Use Equation 4 under
-        Section 4 of https://arxiv.org/abs/1910.07467 as a reference. Add 
-        the given epsilon value (self.eps) to the tensor's norm (i.e. inside
-        the square root in Equation 4) before normalizing the tensor.
+        Compute the root mean square normalization.
 
-        Apply root mean square normalization:
-    
-        RMS(x) = sqrt(mean(x^2) + eps)
-        x_norm = x / RMS(x)
-        
         Args:
-            x (torch.Tensor): input tensor of shape (..., dim)
-        
+            x (torch.Tensor): The input tensor.
+
         Returns:
-            torch.Tensor: normalized tensor of the same shape
+            torch.Tensor: The normalized tensor.
         """
-        # square each element
-        squared = x ** 2
-
-        # compute the mean across the last dimension (1/n * sum_i a_i ** 2)
-        mean_squared = torch.mean(squared, dim=-1, keepdim=True)
-
-        # add epsilon to the mean squared value for numerical stability
-        mean_squared += self.eps
-
-        # compute the root mean square
-        rms = torch.sqrt(mean_squared)
-
-        # normalize the input tensor by dividing by the root mean square
-        normalized = x / rms
-
-        # ensure the output has the same shape as the input
-        return normalized
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         """
@@ -75,7 +50,6 @@ class RMSNorm(torch.nn.Module):
 
         Returns:
             torch.Tensor: The output tensor after applying RMSNorm.
-
         """
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
@@ -315,67 +289,95 @@ class Llama(LlamaPreTrainedModel):
         return logits, h
 
     @torch.inference_mode()
-    def generate(self, idx, max_new_tokens, temperature=1.0):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None, repetition_penalty=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        We perform this generation using basic temperature sampling. Note that we are not using
-        nucleus sampling (i.e. limiting ourselves to sampling from the top-k most probable tokens
-        at each timestep), though this is often used in conjunction with temperature sampling,
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        Also note this is a super inefficient version of sampling with no key/value cache.
+        Generate new tokens from the model using temperature sampling, top-k, and top-p sampling.
+
+        Args:
+            idx (torch.LongTensor): Tensor of shape (B, T) with input token indices.
+            max_new_tokens (int): Number of tokens to generate.
+            temperature (float): Sampling temperature. 0.0 means greedy decoding.
+            top_k (int, optional): Number of top tokens to consider for sampling.
+            top_p (float, optional): Cumulative probability threshold for nucleus sampling.
+            repetition_penalty (float, optional): Penalty for repeated tokens.
+
+        Returns:
+            torch.LongTensor: Generated token sequence of shape (B, T + max_new_tokens)
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+            # Crop the sequence if it exceeds the maximum sequence length
             idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len:]
-            # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] # crop to just the final time step
+            logits = logits[:, -1, :]  # Focus on the last time step
 
+            # Apply repetition penalty
+            if repetition_penalty is not None:
+                for i in range(idx.size(0)):
+                    for token in set(idx[i].tolist()):
+                        logits[i, token] /= repetition_penalty
+
+            # Greedy decoding if temperature is 0
             if temperature == 0.0:
-                # Deterministic (greedy) decoding
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             else:
-                '''
-                Perform temperature sampling:
-                1) identify  the logits at the final step.
-                2) scale (divide) these probabilities by the given temperature.
-                3) normalize the scaled logits with a softmax to obtain scaled probabilities.
-                4) sample from the scaled probability distribution.
+                # Apply top-k sampling
+                if top_k is not None:
+                    values, indices = torch.topk(logits, top_k, dim=-1)
+                    mask = torch.ones_like(logits).scatter_(-1, indices, float('-inf'))
+                    logits = logits.masked_fill(mask.bool(), float('-inf'))
 
-                Note that we are not using top-k sampling/nucleus sampling in this procedure.
-                '''
-                # 1. Scale logits by temperature
+                # Apply top-p (nucleus) sampling
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
+
+                # Scale logits by temperature and sample
                 scaled_logits = logits / temperature
-                # 2. Convert to probabilities
                 probs = F.softmax(scaled_logits, dim=-1)
-                # 3. Sample from the distribution
                 idx_next = torch.multinomial(probs, num_samples=1)
 
-            # append sampled index to the running sequence and continue
+            # Append the sampled token to the sequence
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
 
 def load_pretrained(checkpoint):
-  device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-  #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-  dtype = "float32"
+    """
+    Load a pretrained Llama model from a checkpoint.
 
-  torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-  torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-  device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
-  ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-  ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    Args:
+        checkpoint (str): Path to the checkpoint file.
 
-  # init from a model saved in a specific directory
-  checkpoint_dict = torch.load(checkpoint, map_location=device)
-  config = LlamaConfig(**checkpoint_dict['model_args'])
-  model = Llama(config)
-  state_dict = checkpoint_dict['model']
-  unwanted_prefix = '_orig_mod.'
-  for k,v in list(state_dict.items()):
-      if k.startswith(unwanted_prefix):
-          state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-  model.load_state_dict(state_dict, strict=False)
-  return model
+    Returns:
+        Llama: The loaded Llama model.
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    dtype = "float32"
+
+    torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul
+    torch.backends.cudnn.allow_tf32 = True  # Allow TF32 on cuDNN
+    device_type = 'cuda' if 'cuda' in device else 'cpu'
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+    ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+    try:
+        # Load checkpoint
+        checkpoint_dict = torch.load(checkpoint, map_location=device)
+        config = LlamaConfig(**checkpoint_dict['model_args'])
+        model = Llama(config)
+        state_dict = checkpoint_dict['model']
+        unwanted_prefix = '_orig_mod.'
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Model loaded successfully from {checkpoint}")
+        return model
+    except Exception as e:
+        print(f"Error loading model from checkpoint: {e}")
+        raise
